@@ -1,0 +1,135 @@
+#!/usr/bin/env coffee
+
+http = require "http"
+shelljs = require "shelljs/global"
+fs = require "fs"
+url  = require "url"
+
+host = "10.0.0.184"
+port = 8703
+server = http.createServer()
+author = ""
+
+action =
+    {
+        Push: (req) ->
+            return if(req.query is null)
+            num = 0
+            keys = Object.keys(req.query)
+            if(keys.length is 4)
+                author = req.query.creator
+                fullHash = JSON.parse(req.query.commit)
+                brName = req.query.branch
+                rec = {creator:author,brName:brName,base:req.query.head,hash:fullHash}
+                fs.readFile("./bin/build.json", 'utf-8', (err, data) =>
+                    if (err)
+                        read = []
+                        pull(read,rec)
+                        console.log(err)
+                    else
+                        read = JSON.parse(data)
+                        pull(read,rec)
+                )
+            return
+
+        Remove: (req) ->
+            return if (req.query is null)
+            author = req.query.creator
+            br = req.query.branch
+            fs.readFile("./bin/build.json",'utf-8', (err, data) =>
+                return err if err
+                read = JSON.parse(data)
+                for i in [read.length - 1..0]
+                    read.splice(i,1) if(read[i].creator is author and read[i].brName is br)
+                str = JSON.stringify(read,'','\t')
+                fs.writeFile("./bin/build.json", str, (err) =>
+                    return err if err
+                    Merge()
+                )
+            )
+
+        Publish: (req) ->
+            console.log "Publish"
+            exec("git checkout master", {silent: true})
+            exec("git rebase build",{silent:true})
+            arr = Object.keys(req.query)
+            if(arr.length != 0)
+                exec("git branch #{req.query.cmName}", {silent: true})
+                exec("git tag #{req.query.tag}", {silent: true})
+            locator = exec("git rev-parse master", {silent: true})
+            fs.writeFile('./bin/version.txt',locator,(err) =>
+                return err if err
+            )
+            exec("git branch -D build",{silent:true})
+            exec("rm ./bin/build.json",{silent:true})
+            return "版本已被标识"
+
+        Revert: (req) ->
+            fs.readFile('./bin/version.txt','utf-8', (err, data) =>
+                return err if err
+                exec("git checkout master")
+                exec("git reset --hard #{data}")
+            )
+            return "已回退到前一个版本"
+    }
+
+server.on "request", (request, response) =>
+    return if request.url is "/favicon.ico"
+    req = url.parse(request.url,true)
+    str = req.pathname.split("/")
+    out = action[str[1]](req)
+    console.log("收到客户端的请求了，请求路径是：" + request.url)
+    response.write("#{out}")
+    response.end()
+
+server.listen port, host, () =>
+    console.log "服务器启动成功了，可以通过 http://#{host}:#{port}/ 来进行访问"
+
+### Public ###
+Merge = ->
+    fs.readFile("./bin/version.txt","utf-8", (err, data) =>
+        return err if err
+        exec("git checkout build", {silent: true})
+        exec("git fetch #{author}", {silent: true})
+        exec("git reset --hard #{data}", {silent: true})
+    )
+    fs.readFile("./bin/build.json","utf-8", (err, data) =>
+        return err if err
+        read = JSON.parse(data)
+        return console.log("没有提交记录或者提交失败！") if(read.length == 0)
+        for i in [0...read.length] by 1
+            for j in [0...read[i].hash.length] by 1
+                exec("git checkout master",{silent:true})
+                exec("git branch build",{silent:true})
+                exec("git checkout build",{silent:true})
+                exec("git cherry-pick #{read[i].hash[j]}",{silent:true})
+        console.log("已拉取提交到build分支上!")
+    )
+
+pull = (read,rec) ->
+    console.log "read", read, "rec", rec
+    if(read.length > 0)
+        hasSame = false
+        for i in [0...read.length] by 1
+            if(read[i].creator is rec.creator and read[i].brName is rec.brName)
+                hasSame = true
+                for n in [0...rec.hash.length] by 1
+                    hashSame = false
+                    for o in [0...read[i].hash.length] by 1
+                        if read[i].hash[o] is rec.hash[n]
+                            hashSame = true
+                        if (o is (read[i].hash.length - 1) and hashSame is false)
+                            read[i].hash.push(rec.hash[n])
+                            break
+            else if(i is read.length - 1 && hasSame is false)
+                read.push(rec)
+    else
+        console.log "noHash"
+        read.push(rec)
+    str = JSON.stringify(read,'','\t')
+    fs.writeFile("./bin/build.json", str, (err)=>
+        return err if err
+        console.log('提交已记录')
+        )
+    Merge()
+    console.log("已通知服务器进行拉取")
